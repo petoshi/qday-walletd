@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+      - run: go mod verify
+      - run: go test ./...
+      - name: Build archive
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          test "$(go env GOOS)" = linux
+          test "$(go env GOARCH)" = "$RELEASE_ARCH"
+          version="${RELEASE_TAG#v}"
+          package="qday-walletd-${version}-linux-${RELEASE_ARCH}"
+          mkdir -p "$package/docs"
+          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${version}" -o "$package/qday-walletd" .
+          cp README.md LICENSE "$package/"
+          cp docs/API.md docs/operations.md "$package/docs/"
+          tar -czf "${package}.tar.gz" "$package"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qday-walletd-linux-${{ matrix.arch }}
+          path: qday-walletd-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: qday-walletd-linux-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          cd artifacts
+          sha256sum qday-walletd-*.tar.gz > SHA256SUMS
+          gh release create "$RELEASE_TAG" qday-walletd-*.tar.gz SHA256SUMS \
+            --verify-tag \
+            --notes-from-tag \
+            --title "QDAY walletd ${RELEASE_TAG}"

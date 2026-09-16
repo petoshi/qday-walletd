@@ -53,6 +53,9 @@ go test ./...
 go build -trimpath -o qday-walletd .
 ```
 
+Tagged source and Linux x86_64/ARM64 archives are published on the
+[releases page](https://github.com/petoshi/qday-walletd/releases/latest).
+
 ## Initialize
 
 Put a passphrase of at least 12 characters in a private file:

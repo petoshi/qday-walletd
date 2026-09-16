@@ -1,0 +1,30 @@
+[Unit]
+Description=QDAY custody wallet daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qday-walletd
+Group=qday-walletd
+ExecStart=/usr/local/bin/qday-walletd run -data /var/lib/qday-walletd -password-file /etc/qday-walletd/password
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/qday-walletd
+ReadOnlyPaths=/etc/qday-walletd
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

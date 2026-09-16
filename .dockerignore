@@ -1,0 +1,10 @@
+.git
+build
+walletd-data
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.log
+*.phrase
+*.token

@@ -1,0 +1,10 @@
+/build/
+/qday-walletd
+/walletd-data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.token
+*.key
+*.phrase

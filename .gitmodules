@@ -1,0 +1,3 @@
+[submodule "qday"]
+	path = qday
+	url = https://github.com/petoshi/qday.git

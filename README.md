@@ -42,6 +42,17 @@ QDAY consensus remains in [`petoshi/qday`](https://github.com/petoshi/qday).
 This repository pins that source as a submodule instead of maintaining a
 second copy of consensus.
 
+## Required version
+
+QDAY changed block validation at block 9,100. Use **qday-walletd v0.2.0 or
+newer** on mainnet. Version 0.1.0 follows the old block format and cannot
+validate the upgraded chain.
+
+Upgrading does not change the seed, deposit addresses or database format. Stop
+the daemon, keep the complete data directory, replace the executable and start
+it again. Confirm `qday-walletd version` reports `0.2.0` or newer and wait for
+`/readyz` before accepting deposits or withdrawals. No rescan is required.
+
 ## Build
 
 You need Go 1.26, a C compiler and SQLite development headers.

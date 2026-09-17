@@ -28,7 +28,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var version = "0.1.0"
+var version = "dev"
 
 var (
 	//go:embed qday-mainnet.json

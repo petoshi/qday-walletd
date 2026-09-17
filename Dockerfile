@@ -1,9 +1,10 @@
 FROM golang:1.26-bookworm AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY . .
 RUN test -f qday/core/go.mod && \
     CGO_ENABLED=1 go test ./... && \
-    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/qday-walletd .
+    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/qday-walletd .
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

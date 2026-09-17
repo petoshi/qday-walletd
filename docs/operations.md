@@ -1,5 +1,22 @@
 # Operations
 
+## Mainnet upgrade at block 9,100
+
+QDAY v1 block validation begins at height 9,100. Mainnet operators must run
+qday-walletd v0.2.0 or newer. Version 0.1.0 cannot follow the upgraded chain.
+
+Upgrade in place:
+
+1. Stop qday-walletd cleanly.
+2. Keep the complete data directory, especially `master.key`,
+   `walletd.sqlite3`, `index.sqlite3` and `consensus.db`.
+3. Replace the binary with qday-walletd v0.2.0 or newer.
+4. Start the daemon with the same flags and data directory.
+5. Check `qday-walletd version`, then wait for `/readyz` to return HTTP 200.
+
+The upgrade preserves the master seed, child addresses, withdrawal journal
+and chain data. It requires no new seed, address regeneration or rescan.
+
 ## Files
 
 The data directory contains:

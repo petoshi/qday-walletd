@@ -33,7 +33,7 @@ func waitIndexed(t *testing.T, node *Node) {
 	t.Fatal("wallet index did not reach the chain tip")
 }
 
-func mineBlock(t *testing.T, node *Node, miner types.QdayKeys) {
+func mineBlock(t *testing.T, node *Node, miner types.QdayKeys) types.Block {
 	t.Helper()
 	cs := node.CM.TipState()
 	b := mining.Candidate(cs, miner, node.CM.V2PoolTransactions(), cs.PrevTimestamps[0].Add(2*time.Second))
@@ -47,12 +47,18 @@ func mineBlock(t *testing.T, node *Node, miner types.QdayKeys) {
 		t.Fatal(err)
 	}
 	waitIndexed(t, node)
+	return b
 }
 
 func newServiceTest(t *testing.T) (*Service, *Node, *meta.Store, [32]byte) {
+	return newServiceTestAtV1Height(t, chain.QdayV1ActivationHeight)
+}
+
+func newServiceTestAtV1Height(t *testing.T, height uint64) (*Service, *Node, *meta.Store, [32]byte) {
 	t.Helper()
 	dir := t.TempDir()
 	manifest := chain.QdayDevnet()
+	manifest.Network.Qday.V1Height = height
 	db, tip, err := chain.NewDBStore(chain.NewMemDB(), &manifest.Network, manifest.Genesis, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +102,94 @@ func newServiceTest(t *testing.T) (*Service, *Node, *meta.Store, [32]byte) {
 		_ = records.Close()
 	})
 	return service, node, records, master
+}
+
+func TestWithdrawalsAcrossV1Activation(t *testing.T) {
+	service, node, records, master := newServiceTestAtV1Height(t, 3)
+	deposit, err := service.NewDepositAddress("activation-funds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	premineSeed := [32]byte{0x51, 0x44, 0x41, 0x59}
+	premineKeys, err := types.QdayKeysFromSeed(premineSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, _, err := node.WM.AddressSiacoinOutputs(types.Address(node.Manifest.Premine), false, 0, 10)
+	if err != nil || len(outputs) != 1 {
+		t.Fatalf("premine output: %d, %v", len(outputs), err)
+	}
+	fee := types.HastingsPerSiacoin.Div64(1000)
+	destination, err := types.ParseQdayAddress(deposit.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funding := types.V2Transaction{
+		SiacoinInputs: []types.V2SiacoinInput{{Parent: outputs[0].SiacoinElement}},
+		SiacoinOutputs: []types.SiacoinOutput{
+			{Value: types.Siacoins(20), Address: types.Address(destination)},
+			{Value: outputs[0].SiacoinOutput.Value.Sub(types.Siacoins(20)).Sub(fee), Address: types.Address(node.Manifest.Premine)},
+		},
+		MinerFee: fee, ArbitraryData: (consensus.QdayEnvelope{Kind: consensus.QdayTransfer}).Encode(),
+	}
+	if err := mining.SignTransfer(context.Background(), node.CM.TipState(), &funding, &premineKeys); err != nil {
+		t.Fatal(err)
+	} else if _, err := node.CM.AddV2PoolTransactions(node.CM.Tip(), []types.V2Transaction{funding}); err != nil {
+		t.Fatal(err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	mineBlock(t, node, premineKeys.Public)
+	if node.CM.Tip().Height != 2 {
+		t.Fatalf("tip height = %d", node.CM.Tip().Height)
+	}
+
+	recipientKeys, err := types.QdayKeysFromSeed([32]byte{9, 1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WithdrawalRequest{
+		RequestID: "activation-withdrawal", Destination: recipientKeys.Public.Address().String(),
+		AmountAtomic: types.Siacoins(3).ExactString(), ExpectedUnitAtomic: node.CM.TipState().QdayUnits(node.CM.Tip().Height).ExactString(),
+	}
+	created, fresh, err := service.CreateWithdrawal(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	} else if !fresh || created.Status != "mempool" {
+		t.Fatalf("unexpected pre-activation withdrawal: %#v, fresh=%v", created, fresh)
+	}
+	activation := mineBlock(t, node, premineKeys.Public)
+	if activation.V2 == nil {
+		t.Fatal("activation block has no v2 data")
+	} else if len(activation.V2.Transactions) != 3 {
+		t.Fatalf("activation block has %d transactions", len(activation.V2.Transactions))
+	}
+	marker, err := consensus.ParseQdayEnvelope(activation.V2.Transactions[len(activation.V2.Transactions)-1].ArbitraryData)
+	if err != nil || marker.Kind != consensus.QdayMiningWork {
+		t.Fatalf("activation block has no compact work marker: %v", err)
+	}
+	service.rebroadcast()
+	stored, ok, err := records.Withdrawal(request.RequestID)
+	if err != nil || !ok || stored.Confirmed == nil || stored.Confirmed.Height != 3 {
+		t.Fatalf("activation withdrawal was not confirmed: %#v, %v", stored, err)
+	}
+
+	request = WithdrawalRequest{
+		RequestID: "post-activation-withdrawal", Destination: recipientKeys.Public.Address().String(),
+		AmountAtomic: types.Siacoins(2).ExactString(), ExpectedUnitAtomic: node.CM.TipState().QdayUnits(node.CM.Tip().Height).ExactString(),
+	}
+	created, fresh, err = service.CreateWithdrawal(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	} else if !fresh || created.Status != "mempool" {
+		t.Fatalf("unexpected post-activation withdrawal: %#v, fresh=%v", created, fresh)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	service.rebroadcast()
+	stored, ok, err = records.Withdrawal(request.RequestID)
+	if err != nil || !ok || stored.Confirmed == nil || stored.Confirmed.Height != 4 {
+		t.Fatalf("post-activation withdrawal was not confirmed: %#v, %v", stored, err)
+	}
+	clear(master[:])
 }
 
 func TestMultiAddressWithdrawalAndIdempotency(t *testing.T) {

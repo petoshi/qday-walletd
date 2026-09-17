@@ -1,5 +1,9 @@
 # QDAY walletd API
 
+This API documentation applies to qday-walletd v0.2.0 and newer, which follows
+QDAY's block 9,100 consensus upgrade. Older walletd builds must not be used on
+current mainnet.
+
 The API defaults to `http://127.0.0.1:19772`. Every `/v1` request requires:
 
 ```http

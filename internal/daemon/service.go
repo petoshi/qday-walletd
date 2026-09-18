@@ -504,57 +504,9 @@ func (s *Service) CreateWithdrawal(ctx context.Context, request WithdrawalReques
 	if request.ExpectedUnitAtomic == "" || request.ExpectedUnitAtomic != unit.ExactString() {
 		return WithdrawalView{}, false, errors.New("expectedUnitAtomic does not match the active QDAY denomination")
 	}
-	required, overflow := value.AddWithOverflow(fee)
-	if overflow {
-		return WithdrawalView{}, false, errors.New("amount plus fee overflows")
-	}
-	outputs, err := s.spendableOutputs(cs)
+	txn, err := s.buildCustodyTransfer(ctx, cs, master, destination, value, fee)
 	if err != nil {
 		return WithdrawalView{}, false, err
-	}
-	sort.Slice(outputs, func(i, j int) bool {
-		return cs.QdayValue(outputs[i].SiacoinElement, cs.Index.Height+2).Cmp(cs.QdayValue(outputs[j].SiacoinElement, cs.Index.Height+2)) > 0
-	})
-	txn := types.V2Transaction{MinerFee: fee}
-	owners := make([]meta.Address, 0, maxInputs)
-	var total types.Currency
-	for _, output := range outputs {
-		owner, ok, err := s.records.AddressByHash(output.SiacoinOutput.Address)
-		if err != nil {
-			return WithdrawalView{}, false, err
-		} else if !ok {
-			return WithdrawalView{}, false, errors.New("indexed output belongs to an unknown key")
-		}
-		txn.SiacoinInputs = append(txn.SiacoinInputs, types.V2SiacoinInput{Parent: output.SiacoinElement, SatisfiedPolicy: types.SatisfiedPolicy{Policy: owner.Public.Policy()}})
-		owners = append(owners, owner)
-		total = total.Add(cs.QdayValue(output.SiacoinElement, cs.Index.Height+2))
-		if total.Cmp(required) >= 0 || len(txn.SiacoinInputs) == maxInputs {
-			break
-		}
-	}
-	if total.Cmp(required) < 0 {
-		return WithdrawalView{}, false, errors.New("insufficient confirmed spendable balance within the 128-input limit")
-	}
-	txn.SiacoinOutputs = append(txn.SiacoinOutputs, types.SiacoinOutput{Value: value, Address: types.Address(destination)})
-	if change := total.Sub(required); !change.IsZero() {
-		changeAddress, err := s.newAddress("", "change")
-		if err != nil {
-			return WithdrawalView{}, false, err
-		}
-		txn.SiacoinOutputs = append(txn.SiacoinOutputs, types.SiacoinOutput{Value: change, Address: types.Address(changeAddress.Address)})
-	}
-	txn.ArbitraryData = (consensus.QdayEnvelope{Kind: consensus.QdayTransfer}).Encode()
-	if err := performDefendWork(ctx, cs, &txn); err != nil {
-		return WithdrawalView{}, false, err
-	}
-	if err := signInputs(ctx, cs, &txn, owners, master); err != nil {
-		return WithdrawalView{}, false, err
-	}
-	if s.node.CM.Tip() != cs.Index {
-		return WithdrawalView{}, false, errors.New("chain changed while signing; retry with the same requestID")
-	}
-	if err := consensus.ValidateV2Transaction(consensus.NewMidState(cs), txn); err != nil {
-		return WithdrawalView{}, false, fmt.Errorf("constructed withdrawal is invalid: %w", err)
 	}
 	w := meta.Withdrawal{RequestID: request.RequestID, Kind: "withdrawal", Transaction: txn, Basis: cs.Index, Destination: destination, Amount: value, Fee: fee, CreatedAt: time.Now().UTC()}
 	if err := s.records.AddWithdrawal(w); err != nil {
@@ -794,6 +746,7 @@ func (s *Service) updateProofs(txns []types.V2Transaction, from, to types.ChainI
 
 func (s *Service) rebroadcast() {
 	tip := s.node.CM.Tip()
+	defer s.rebroadcastSwapActions(tip)
 	withdrawals, err := s.records.RebroadcastCandidates(tip.Height, reorgMonitoringDepth)
 	if err != nil {
 		s.log.Error("load withdrawals for rebroadcast", zap.Error(err))

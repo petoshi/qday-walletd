@@ -14,6 +14,7 @@ import (
 
 	"github.com/petoshi/qday-walletd/internal/meta"
 	"go.sia.tech/core/gateway"
+	"go.sia.tech/core/types"
 	"go.sia.tech/coreutils"
 	"go.sia.tech/coreutils/chain"
 	"go.sia.tech/coreutils/syncer"
@@ -37,6 +38,9 @@ type Node struct {
 	WM       *wallet.Manager
 	Syncer   *syncer.Syncer
 	WalletID wallet.ID
+	// SwapWalletID is an internal index partition. It prevents contract-locked
+	// outputs from entering custody balance, withdrawals or automatic DEFEND.
+	SwapWalletID wallet.ID
 
 	bdb      io.Closer
 	store    *sqlite.Store
@@ -196,11 +200,22 @@ func OpenNode(ctx context.Context, cfg NodeConfig, records *meta.Store, log *zap
 		fail()
 		return nil, err
 	}
-	var custody wallet.Wallet
+	var custody, swaps wallet.Wallet
 	for _, candidate := range wallets {
 		if candidate.Name == "QDAY Custody" {
 			custody = candidate
-			break
+		} else if candidate.Name == "QDAY Atomic Swaps" {
+			swaps = candidate
+		}
+	}
+	if swaps.ID == 0 {
+		swaps, err = wm.AddWallet(wallet.Wallet{Name: "QDAY Atomic Swaps", Description: "qday-walletd contract index partition"})
+		if err != nil {
+			_ = wm.Close()
+			_ = sy.Close()
+			_ = listener.Close()
+			fail()
+			return nil, err
 		}
 	}
 	if custody.ID == 0 {
@@ -241,7 +256,43 @@ func OpenNode(ctx context.Context, cfg NodeConfig, records *meta.Store, log *zap
 			break
 		}
 	}
-	return &Node{Manifest: manifest, CM: cm, WM: wm, Syncer: sy, WalletID: custody.ID, bdb: bdb, store: store, listener: listener}, nil
+	for offset := 0; ; offset += 1000 {
+		contracts, err := records.Swaps(1000, offset)
+		if err != nil {
+			_ = wm.Close()
+			_ = sy.Close()
+			_ = listener.Close()
+			fail()
+			return nil, err
+		}
+		if len(contracts) == 0 {
+			break
+		}
+		batch := make([]wallet.Address, len(contracts))
+		for i, contract := range contracts {
+			swap := types.QdayAtomicSwap{Recipient: contract.Recipient, Refund: contract.Refund, SecretHash: contract.SecretHash, RefundHeight: contract.RefundHeight}
+			policy, err := swap.Policy()
+			if err != nil {
+				_ = wm.Close()
+				_ = sy.Close()
+				_ = listener.Close()
+				fail()
+				return nil, fmt.Errorf("load atomic swap %q: %w", contract.SwapID, err)
+			}
+			batch[i] = wallet.Address{Address: policy.Address(), SpendPolicy: &policy, Description: contract.SwapID}
+		}
+		if err := wm.AddAddresses(swaps.ID, batch...); err != nil {
+			_ = wm.Close()
+			_ = sy.Close()
+			_ = listener.Close()
+			fail()
+			return nil, fmt.Errorf("register atomic-swap batch at offset %d: %w", offset, err)
+		}
+		if len(contracts) < 1000 {
+			break
+		}
+	}
+	return &Node{Manifest: manifest, CM: cm, WM: wm, Syncer: sy, WalletID: custody.ID, SwapWalletID: swaps.ID, bdb: bdb, store: store, listener: listener}, nil
 }
 
 func (n *Node) Close() error {

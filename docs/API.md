@@ -162,3 +162,135 @@ Returns recent records. `kind` is `withdrawal` for an exchange request and
 The daemon persists signed transactions, updates their accumulator proofs as
 the chain moves and retries after restarts and reorganizations. Transaction IDs
 do not change when accumulator proofs are updated.
+
+## Atomic swaps
+
+The swap API uses QDAY's native SHA-256 hashlock and block-height refund policy.
+Each `swapID` has a separate deterministic Ed25519 and SLH-DSA key pair. It is
+also the idempotency key for the contract: a registered ID cannot be reused
+with another role, counterparty, hash or refund height.
+
+The local role is one of:
+
+- `recipient`: walletd can claim with the secret;
+- `refund`: walletd can refund after `refundHeight`.
+
+Contract outputs live in a separate internal index partition. They are absent
+from `/v1/balance` and can never be selected by `/v1/withdrawals` or automatic
+DEFEND. Claim and refund proceeds return to a normal managed change address.
+
+### `POST /v1/swap-keys`
+
+```json
+{"swapID":"basicswap-order-17"}
+```
+
+The first call requires an unlocked wallet and creates the public descriptor
+for this session. An identical retry returns the same descriptor. Private keys
+never leave walletd and are not stored in `walletd.sqlite3`.
+
+```json
+{
+  "swapID":"basicswap-order-17",
+  "keys":{
+    "classical":"32-byte lowercase hex",
+    "reserve":"32-byte lowercase hex",
+    "address":"qday1p..."
+  },
+  "createdAt":"2026-09-18T12:00:00Z"
+}
+```
+
+### `POST /v1/swaps`
+
+Register the immutable contract after exchanging public descriptors with the
+counterparty:
+
+```json
+{
+  "swapID":"basicswap-order-17",
+  "role":"recipient",
+  "counterparty":{
+    "classical":"32-byte lowercase hex",
+    "reserve":"32-byte lowercase hex",
+    "address":"qday1p..."
+  },
+  "secretHash":"32-byte lowercase SHA-256 hex",
+  "refundHeight":15000
+}
+```
+
+The `address` inside `counterparty` is optional, but when supplied it must match
+the two public keys. walletd combines the local session key with the
+counterparty descriptor, derives the contract address and stores the complete
+contract. Create `/v1/swap-keys` first. An identical retry returns the original
+contract; changed terms are rejected.
+
+### `POST /v1/swaps/{swapID}/fund`
+
+```json
+{
+  "amountAtomic":"5000000000000000000000000",
+  "feeAtomic":"1000000000000000000000",
+  "expectedUnitAtomic":"1000000000000000000000000"
+}
+```
+
+Builds a custody-funded transaction to the exact registered contract. Only one
+local funding action is allowed per session. An identical retry returns the
+same transaction. walletd refuses to fund at a height where the refund branch
+can already be used. A counterparty may fund the address independently; the
+status endpoint discovers that output without a local funding action.
+
+### `POST /v1/swaps/{swapID}/claim`
+
+Available only for a session registered with role `recipient`:
+
+```json
+{
+  "outputID":"32-byte siacoin output ID",
+  "feeAtomic":"1000000000000000000000",
+  "secret":"32-byte lowercase hex"
+}
+```
+
+The secret must match `secretHash`. walletd spends one confirmed contract
+output, signs it with both QDAY key algorithms, persists the complete
+transaction and submits it. Repeating the same output, fee and secret is
+idempotent.
+
+### `POST /v1/swaps/{swapID}/refund`
+
+Available only for a session registered with role `refund` and only when the
+selected tip has reached `refundHeight`:
+
+```json
+{
+  "outputID":"32-byte siacoin output ID",
+  "feeAtomic":"1000000000000000000000"
+}
+```
+
+The request must not contain `secret`. It has the same persistence,
+idempotency, proof update and rebroadcast behavior as a claim.
+
+### `GET /v1/swaps/{swapID}`
+
+Returns the immutable contract, current height, local role, every observed
+contract output and all locally created funding, claim and refund actions.
+Output statuses are:
+
+- `funding`: output is in the local mempool;
+- `funded`: output is confirmed and unspent;
+- `claiming` or `refunding`: its spend is in the mempool;
+- `claimed` or `refunded`: its spend is confirmed.
+
+A claim includes `revealedSecret` as soon as its valid witness is visible in
+the mempool or selected chain. Poll this endpoint instead of parsing witness
+layout in the exchange integration. A reorganization removes orphaned output,
+spend and secret observations from the returned selected-chain view.
+
+### `GET /v1/swaps?limit=50&offset=0`
+
+Returns registered sessions newest first. The aggregate session `status` uses
+the same lifecycle names. Both read endpoints require the bearer token.

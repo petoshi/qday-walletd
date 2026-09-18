@@ -35,6 +35,10 @@ qday-walletd ───── QDAY P2P
   reorganization;
 - automatic transaction rebroadcast;
 - automatic DEFEND renewal when managed outputs approach their shield expiry;
+- deterministic per-session atomic-swap keys, contract funding, claim and
+  height-locked refund transactions;
+- persistent swap and transaction journals with selected-chain secret
+  extraction;
 - a local bearer-authenticated API and explicit readiness endpoint;
 - Linux Docker and systemd deployment files.
 
@@ -129,11 +133,36 @@ curl -sS http://127.0.0.1:19772/v1/withdrawals \
 `requestID` is an idempotency key. Repeating the same request returns the same
 transaction. Reusing it for another amount, fee or destination is rejected.
 
+## Atomic swaps
+
+Every swap gets an independent key pair derived from the same encrypted master
+seed. The daemon stores only the public descriptor and session ID. Contract
+outputs are indexed separately from custody funds, so they cannot be selected
+by a normal withdrawal or automatic DEFEND transaction.
+
+The authenticated API covers the complete on-chain lifecycle:
+
+```text
+create session keys → register contract → fund → claim or refund
+                                      └── observe counterparty spend and secret
+```
+
+Session registration is idempotent. Funding, claims and refunds are written to
+the journal before submission, survive restarts, update accumulator proofs and
+keep rebroadcasting across chain movement. `GET /v1/swaps/{swapID}` reports both
+confirmed and mempool state and returns the hash preimage as soon as a valid
+claim reveals it.
+
+See the [atomic swap API](docs/API.md#atomic-swaps) for request bodies and the
+derivation rule in [operations.md](docs/operations.md#deterministic-derivation).
+
 ## Backups
 
 The seed phrase recovers the keys for every child index. Back up
 `walletd.sqlite3` as well: it contains customer references, the highest issued
-child index and the withdrawal journal. It contains no private keys.
+child index, swap session IDs and the transaction journals. It contains no
+private keys. A revealed swap secret can appear inside a persisted signed claim
+transaction because that secret is public once the claim is submitted.
 
 If that database is lost, restore the encrypted master seed and regenerate a
 known number of child addresses:

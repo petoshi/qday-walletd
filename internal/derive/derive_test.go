@@ -33,3 +33,37 @@ func TestDeterministicDistinctChildren(t *testing.T) {
 		t.Fatalf("child address changed: %s", got)
 	}
 }
+
+func TestSwapKeysUseSeparateStableNamespace(t *testing.T) {
+	master := [32]byte{1, 2, 3, 4}
+	a, err := SwapKeys(master, "dex-order-17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := SwapKeys(master, "dex-order-17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := SwapKeys(master, "dex-order-18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	custody, err := Keys(master, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Public != b.Public {
+		t.Fatal("same swap ID produced different keys")
+	} else if a.Public == c.Public {
+		t.Fatal("different swap IDs produced the same keys")
+	} else if a.Public == custody.Public {
+		t.Fatal("swap derivation collided with the custody namespace")
+	}
+	seed := SwapSeed(master, "dex-order-17")
+	if got := hex.EncodeToString(seed[:]); got != "aa2605584ef7f795bb4be46189ee4c614872e595a6bc30cf50e53ce9fa4bb308" {
+		t.Fatalf("swap seed changed: %s", got)
+	}
+	if got := a.Public.String(); got != "qday1p2etdds8uzx7r2a60n6la4peu02raw4fxkdpcwtkd8sn7l5dyn3cqhl9lwm" {
+		t.Fatalf("swap address changed: %s", got)
+	}
+}

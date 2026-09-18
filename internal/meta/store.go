@@ -66,6 +66,39 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   confirmed_height INTEGER,
   confirmed_block_id BLOB CHECK(confirmed_block_id IS NULL OR length(confirmed_block_id) = 32),
   CHECK((confirmed_height IS NULL) = (confirmed_block_id IS NULL))
+);
+CREATE TABLE IF NOT EXISTS swap_keys (
+  swap_id TEXT PRIMARY KEY,
+  public_keys BLOB NOT NULL CHECK(length(public_keys) = 64),
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS swaps (
+  swap_id TEXT PRIMARY KEY REFERENCES swap_keys(swap_id),
+  role TEXT NOT NULL CHECK(role IN ('recipient','refund')),
+  recipient_keys BLOB NOT NULL CHECK(length(recipient_keys) = 64),
+  refund_keys BLOB NOT NULL CHECK(length(refund_keys) = 64),
+  secret_hash BLOB NOT NULL CHECK(length(secret_hash) = 32),
+  refund_height INTEGER NOT NULL CHECK(refund_height > 0),
+  contract_address TEXT UNIQUE NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS swap_actions (
+  action_id TEXT PRIMARY KEY,
+  swap_id TEXT NOT NULL REFERENCES swaps(swap_id),
+  kind TEXT NOT NULL CHECK(kind IN ('fund','claim','refund')),
+  output_id TEXT NOT NULL,
+  transaction_blob BLOB NOT NULL,
+  basis_height INTEGER NOT NULL,
+  basis_id BLOB NOT NULL CHECK(length(basis_id) = 32),
+  destination TEXT NOT NULL,
+  amount_atomic TEXT NOT NULL,
+  fee_atomic TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_error TEXT NOT NULL DEFAULT '',
+  confirmed_height INTEGER,
+  confirmed_block_id BLOB CHECK(confirmed_block_id IS NULL OR length(confirmed_block_id) = 32),
+  CHECK((confirmed_height IS NULL) = (confirmed_block_id IS NULL)),
+  UNIQUE(swap_id,kind,output_id)
 );`); err != nil {
 		db.Close()
 		return nil, err
@@ -105,7 +138,11 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 			return nil, err
 		}
 	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS withdrawals_confirmed_height ON withdrawals(confirmed_height); UPDATE schema_version SET version=2`); err != nil {
+	if _, err := db.Exec(`
+CREATE INDEX IF NOT EXISTS withdrawals_confirmed_height ON withdrawals(confirmed_height);
+CREATE INDEX IF NOT EXISTS swap_actions_confirmed_height ON swap_actions(confirmed_height);
+CREATE INDEX IF NOT EXISTS swap_actions_swap_id ON swap_actions(swap_id,created_at);
+UPDATE schema_version SET version=3`); err != nil {
 		db.Close()
 		return nil, err
 	}

@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,11 +79,15 @@ func newServiceTestAtV1Height(t *testing.T, height uint64) (*Service, *Node, *me
 	if err != nil {
 		t.Fatal(err)
 	}
+	swapIndex, err := wm.AddWallet(wallet.Wallet{Name: "QDAY Atomic Swaps"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	records, err := meta.Open(filepath.Join(dir, "walletd.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := &Node{Manifest: manifest, CM: cm, WM: wm, WalletID: w.ID}
+	node := &Node{Manifest: manifest, CM: cm, WM: wm, WalletID: w.ID, SwapWalletID: swapIndex.ID}
 	master := [32]byte{7, 7, 7}
 	masterKeys, err := types.QdayKeysFromSeed(master)
 	if err != nil {
@@ -102,6 +109,40 @@ func newServiceTestAtV1Height(t *testing.T, height uint64) (*Service, *Node, *me
 		_ = records.Close()
 	})
 	return service, node, records, master
+}
+
+func fundAddressFromPremine(t *testing.T, node *Node, destination types.QdayAddress, value types.Currency) types.V2Transaction {
+	t.Helper()
+	premineKeys, err := types.QdayKeysFromSeed([32]byte{0x51, 0x44, 0x41, 0x59})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs, basis, err := node.WM.AddressSiacoinOutputs(types.Address(node.Manifest.Premine), false, 0, 10)
+	if err != nil || len(outputs) != 1 {
+		t.Fatalf("premine output: %d, %v", len(outputs), err)
+	} else if basis != node.CM.Tip() {
+		t.Fatal("wallet index is behind before funding")
+	}
+	fee := types.HastingsPerSiacoin.Div64(1000)
+	required, overflow := value.AddWithOverflow(fee)
+	if overflow || outputs[0].SiacoinOutput.Value.Cmp(required) <= 0 {
+		t.Fatal("premine fixture cannot fund test")
+	}
+	txn := types.V2Transaction{
+		SiacoinInputs: []types.V2SiacoinInput{{Parent: outputs[0].SiacoinElement}},
+		SiacoinOutputs: []types.SiacoinOutput{
+			{Value: value, Address: types.Address(destination)},
+			{Value: outputs[0].SiacoinOutput.Value.Sub(required), Address: types.Address(node.Manifest.Premine)},
+		},
+		MinerFee: fee, ArbitraryData: (consensus.QdayEnvelope{Kind: consensus.QdayTransfer}).Encode(),
+	}
+	if err := mining.SignTransfer(context.Background(), node.CM.TipState(), &txn, &premineKeys); err != nil {
+		t.Fatal(err)
+	} else if _, err := node.CM.AddV2PoolTransactions(node.CM.Tip(), []types.V2Transaction{txn}); err != nil {
+		t.Fatal(err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	return txn
 }
 
 func TestWithdrawalsAcrossV1Activation(t *testing.T) {
@@ -321,5 +362,210 @@ func TestMultiAddressWithdrawalAndIdempotency(t *testing.T) {
 	}
 	if !foundInternal {
 		t.Fatalf("wallet-funded transfer was not reported: %#v", deposits)
+	}
+}
+
+func TestAtomicSwapFundingClaimAndSecretDetection(t *testing.T) {
+	service, node, records, _ := newServiceTestAtV1Height(t, 1)
+	deposit, err := service.NewDepositAddress("swap-funding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	depositAddress, err := types.ParseQdayAddress(deposit.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fundAddressFromPremine(t, node, depositAddress, types.Siacoins(20))
+
+	const swapID = "basic-swap-order-17"
+	keyView, created, err := service.CreateSwapKeys(swapID)
+	if err != nil || !created {
+		t.Fatalf("create swap keys: created=%v, err=%v", created, err)
+	}
+	replayedKeys, created, err := service.CreateSwapKeys(swapID)
+	if err != nil || created || replayedKeys.Keys != keyView.Keys {
+		t.Fatalf("swap keys are not idempotent: %#v, created=%v, err=%v", replayedKeys, created, err)
+	}
+	refundKeys, err := types.QdayKeysFromSeed([32]byte{8, 8, 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := [32]byte{4, 2, 4, 2}
+	secretHash := sha256.Sum256(secret[:])
+	registration := RegisterSwapRequest{
+		SwapID: swapID, Role: "recipient", Counterparty: swapKeysView(refundKeys.Public),
+		SecretHash: hex.EncodeToString(secretHash[:]), RefundHeight: node.CM.Tip().Height + 10,
+	}
+	registered, fresh, err := service.RegisterSwap(registration)
+	if err != nil || !fresh {
+		t.Fatalf("register swap: fresh=%v, err=%v", fresh, err)
+	} else if registered.Local != keyView.Keys || registered.Address == "" || registered.Status != "waiting" {
+		t.Fatalf("unexpected registered swap: %#v", registered)
+	}
+	replayed, fresh, err := service.RegisterSwap(registration)
+	if err != nil || fresh || replayed.Address != registered.Address {
+		t.Fatalf("swap registration is not idempotent: %#v, fresh=%v, err=%v", replayed, fresh, err)
+	}
+	keyPath := service.keyPath
+	service.Close()
+	service = NewService(context.Background(), node, records, keyPath, zap.NewNop())
+	if err := service.Unlock("test-walletd-password"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if restored, ok, err := service.Swap(swapID); err != nil || !ok || restored.Address != registered.Address {
+		t.Fatalf("swap journal did not survive service restart: %#v, %v", restored, err)
+	}
+
+	unit := node.CM.TipState().QdayUnits(node.CM.Tip().Height)
+	funding, fresh, err := service.FundSwap(context.Background(), swapID, FundSwapRequest{
+		AmountAtomic: types.Siacoins(5).ExactString(), ExpectedUnitAtomic: unit.ExactString(),
+	})
+	if err != nil || !fresh || funding.Status != "mempool" {
+		t.Fatalf("fund swap: %#v, fresh=%v, err=%v", funding, fresh, err)
+	}
+	premineKeys, err := types.QdayKeysFromSeed([32]byte{0x51, 0x44, 0x41, 0x59})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	view, ok, err := service.Swap(swapID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	} else if view.Status != "funded" || len(view.Outputs) != 1 || view.Outputs[0].Status != "funded" {
+		t.Fatalf("funded swap was not observed: %#v", view)
+	}
+	balance, err := service.Balance()
+	wantCustody := types.Siacoins(15).Sub(types.HastingsPerSiacoin.Div64(1000)).ExactString()
+	if err != nil {
+		t.Fatal(err)
+	} else if balance.Spendable.Atomic != wantCustody {
+		t.Fatalf("contract output leaked into custody balance: got %s, want %s", balance.Spendable.Atomic, wantCustody)
+	}
+	fundedTip := node.CM.Tip()
+	outputID := view.Outputs[0].ID
+	claim, fresh, err := service.ClaimSwap(context.Background(), swapID, SpendSwapRequest{
+		OutputID: outputID, Secret: hex.EncodeToString(secret[:]),
+	})
+	if err != nil || !fresh || claim.Status != "mempool" {
+		t.Fatalf("claim swap: %#v, fresh=%v, err=%v", claim, fresh, err)
+	}
+	view, _, err = service.Swap(swapID)
+	if err != nil {
+		t.Fatal(err)
+	} else if view.Status != "claiming" || len(view.Outputs) != 1 || view.Outputs[0].RevealedSecret != hex.EncodeToString(secret[:]) {
+		t.Fatalf("mempool claim secret was not detected: %#v", view)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	service.rebroadcast()
+	view, _, err = service.Swap(swapID)
+	if err != nil {
+		t.Fatal(err)
+	} else if view.Status != "claimed" || view.Outputs[0].Status != "claimed" || view.Outputs[0].RevealedSecret != hex.EncodeToString(secret[:]) {
+		t.Fatalf("confirmed claim was not detected: %#v", view)
+	}
+	replayedClaim, fresh, err := service.ClaimSwap(context.Background(), swapID, SpendSwapRequest{
+		OutputID: outputID, Secret: hex.EncodeToString(secret[:]),
+	})
+	if err != nil || fresh || replayedClaim.TransactionID != claim.TransactionID {
+		t.Fatalf("claim is not idempotent: %#v, fresh=%v, err=%v", replayedClaim, fresh, err)
+	}
+	stored, ok, err := records.SwapAction(swapID, "claim", outputID)
+	if err != nil || !ok || stored.Confirmed == nil {
+		t.Fatalf("claim journal was not confirmed: %#v, %v", stored, err)
+	}
+
+	// Replace the claim block with a longer branch. The selected-chain view
+	// must demote the claim to mempool, clear its persisted confirmation and
+	// keep the revealed secret available from the rebroadcast transaction.
+	sideState, ok := node.CM.State(fundedTip.ID)
+	if !ok {
+		t.Fatal("missing funded-tip state")
+	}
+	for range 2 {
+		block := mining.Candidate(sideState, premineKeys.Public, nil, sideState.PrevTimestamps[0].Add(2*time.Second))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		block, err = mining.Mine(ctx, sideState, block, 2, nil)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		} else if err := node.CM.AddBlocks([]types.Block{block}); err != nil {
+			t.Fatal(err)
+		}
+		// Manager stores header state for a non-selected branch. Build the full
+		// accumulator state locally so the next block commits to side-chain
+		// outputs instead of the selected chain's accumulator.
+		sideState, _ = consensus.ApplyBlock(sideState, block, consensus.V1BlockSupplement{}, time.Time{})
+	}
+	waitIndexed(t, node)
+	service.rebroadcast()
+	stored, _, err = records.SwapAction(swapID, "claim", outputID)
+	if err != nil || stored.Confirmed != nil {
+		t.Fatalf("orphaned claim confirmation was not cleared: %#v, %v", stored.Confirmed, err)
+	}
+	view, _, err = service.Swap(swapID)
+	if err != nil {
+		t.Fatal(err)
+	} else if view.Status != "claiming" || view.Outputs[0].SpendHeight != nil || view.Outputs[0].RevealedSecret != hex.EncodeToString(secret[:]) {
+		t.Fatalf("orphaned claim was not restored to mempool: %#v", view)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	service.rebroadcast()
+	view, _, err = service.Swap(swapID)
+	if err != nil || view.Status != "claimed" {
+		t.Fatalf("rebroadcast claim did not reconfirm: %#v, %v", view, err)
+	}
+}
+
+func TestAtomicSwapRefundLifecycle(t *testing.T) {
+	service, node, _, _ := newServiceTestAtV1Height(t, 1)
+	const swapID = "basic-swap-order-refund"
+	keyView, _, err := service.CreateSwapKeys(swapID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientKeys, err := types.QdayKeysFromSeed([32]byte{6, 6, 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := [32]byte{7, 7, 7}
+	secretHash := sha256.Sum256(secret[:])
+	view, fresh, err := service.RegisterSwap(RegisterSwapRequest{
+		SwapID: swapID, Role: "refund", Counterparty: swapKeysView(recipientKeys.Public),
+		SecretHash: hex.EncodeToString(secretHash[:]), RefundHeight: 3,
+	})
+	if err != nil || !fresh || view.Local != keyView.Keys {
+		t.Fatalf("register refund swap: %#v, fresh=%v, err=%v", view, fresh, err)
+	}
+	address, err := types.ParseQdayAddress(view.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fundAddressFromPremine(t, node, address, types.Siacoins(4))
+	view, _, err = service.Swap(swapID)
+	if err != nil || len(view.Outputs) != 1 {
+		t.Fatalf("observe refund funding: %#v, %v", view, err)
+	}
+	request := SpendSwapRequest{OutputID: view.Outputs[0].ID}
+	if _, _, err := service.RefundSwap(context.Background(), swapID, request); err == nil || !strings.Contains(err.Error(), "locked until height 3") {
+		t.Fatalf("early refund was accepted: %v", err)
+	}
+	premineKeys, err := types.QdayKeysFromSeed([32]byte{0x51, 0x44, 0x41, 0x59})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	if _, _, err := service.RefundSwap(context.Background(), swapID, request); err == nil || !strings.Contains(err.Error(), "locked until height 3") {
+		t.Fatalf("refund at height 2 was accepted: %v", err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	refund, fresh, err := service.RefundSwap(context.Background(), swapID, request)
+	if err != nil || !fresh || refund.Status != "mempool" {
+		t.Fatalf("refund swap: %#v, fresh=%v, err=%v", refund, fresh, err)
+	}
+	mineBlock(t, node, premineKeys.Public)
+	view, _, err = service.Swap(swapID)
+	if err != nil || view.Status != "refunded" || view.Outputs[0].RevealedSecret != "" {
+		t.Fatalf("confirmed refund was not detected: %#v, %v", view, err)
 	}
 }

@@ -24,7 +24,7 @@ The data directory contains:
 | File | Purpose | Backup |
 | --- | --- | --- |
 | `master.key` | encrypted 32-byte master seed | yes |
-| `walletd.sqlite3` | address references and withdrawal journal | yes |
+| `walletd.sqlite3` | address references, withdrawal and swap journals | yes |
 | `index.sqlite3` | rebuildable selected-chain address index | optional |
 | `consensus.db` | rebuildable QDAY chain state | optional |
 | `api.token` | API bearer credential | rotate if exposed |
@@ -140,3 +140,28 @@ address    = qday1phvrc8fs0jauhhxhcq0yktyheu35adxcy7areps987zpw327043tq6s7wkk
 
 The 24-word phrase encodes `masterSeed`. The public metadata database records
 which child indices were issued and associates deposit references with them.
+
+For an atomic-swap session ID `s`, walletd uses a separate derivation namespace:
+
+```text
+swapSeed = HMAC-SHA512(
+  key  = masterSeed,
+  data = "QDAY/walletd/swap/v1" || uint64_big_endian(len(s)) || bytes(s)
+)[0:32]
+```
+
+`swapID` is restricted to 1 through 128 ASCII letters, digits, `.`, `_`, `:`
+or `-`. The seed enters the same domain-separated Ed25519 and SLH-DSA-SHA2-128s
+key derivation as a custody child, but it can never collide with the child-index
+namespace. Back up `walletd.sqlite3`: the phrase controls the keys, while the
+database records the session IDs and immutable contracts needed to reproduce
+which swap key belongs to which trade.
+
+Test vector:
+
+```text
+masterSeed = 0102030400000000000000000000000000000000000000000000000000000000
+swapID     = dex-order-17
+swapSeed   = aa2605584ef7f795bb4be46189ee4c614872e595a6bc30cf50e53ce9fa4bb308
+address    = qday1p2etdds8uzx7r2a60n6la4peu02raw4fxkdpcwtkd8sn7l5dyn3cqhl9lwm
+```

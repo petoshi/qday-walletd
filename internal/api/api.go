@@ -36,6 +36,13 @@ func New(service *daemon.Service, token string) http.Handler {
 	mux.HandleFunc("GET /v1/withdrawals", a.auth(a.withdrawals))
 	mux.HandleFunc("POST /v1/withdrawals", a.auth(a.createWithdrawal))
 	mux.HandleFunc("GET /v1/withdrawals/{requestID}", a.auth(a.withdrawal))
+	mux.HandleFunc("POST /v1/swap-keys", a.auth(a.createSwapKeys))
+	mux.HandleFunc("GET /v1/swaps", a.auth(a.swaps))
+	mux.HandleFunc("POST /v1/swaps", a.auth(a.registerSwap))
+	mux.HandleFunc("GET /v1/swaps/{swapID}", a.auth(a.swap))
+	mux.HandleFunc("POST /v1/swaps/{swapID}/fund", a.auth(a.fundSwap))
+	mux.HandleFunc("POST /v1/swaps/{swapID}/claim", a.auth(a.claimSwap))
+	mux.HandleFunc("POST /v1/swaps/{swapID}/refund", a.auth(a.refundSwap))
 	return securityHeaders(mux)
 }
 
@@ -253,4 +260,115 @@ func (a *API) withdrawals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"withdrawals": withdrawals, "limit": limit, "offset": offset})
+}
+
+func (a *API) createSwapKeys(w http.ResponseWriter, r *http.Request) {
+	var request daemon.SwapKeyRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	keys, created, err := a.service.CreateSwapKeys(request.SwapID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, keys)
+}
+
+func (a *API) registerSwap(w http.ResponseWriter, r *http.Request) {
+	var request daemon.RegisterSwapRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	swap, created, err := a.service.RegisterSwap(request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, swap)
+}
+
+func (a *API) swaps(w http.ResponseWriter, r *http.Request) {
+	limit, offset, err := pagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	swaps, err := a.service.Swaps(limit, offset)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"swaps": swaps, "limit": limit, "offset": offset})
+}
+
+func (a *API) swap(w http.ResponseWriter, r *http.Request) {
+	swap, ok, err := a.service.Swap(r.PathValue("swapID"))
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	} else if !ok {
+		writeError(w, http.StatusNotFound, "atomic swap not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, swap)
+}
+
+func (a *API) fundSwap(w http.ResponseWriter, r *http.Request) {
+	var request daemon.FundSwapRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	action, created, err := a.service.FundSwap(r.Context(), r.PathValue("swapID"), request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, action)
+}
+
+func (a *API) claimSwap(w http.ResponseWriter, r *http.Request) {
+	var request daemon.SpendSwapRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	action, created, err := a.service.ClaimSwap(r.Context(), r.PathValue("swapID"), request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, action)
+}
+
+func (a *API) refundSwap(w http.ResponseWriter, r *http.Request) {
+	var request daemon.SpendSwapRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	action, created, err := a.service.RefundSwap(r.Context(), r.PathValue("swapID"), request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, action)
 }

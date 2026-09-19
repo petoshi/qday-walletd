@@ -192,3 +192,30 @@ The suite verifies:
 GitHub Actions downloads the pinned Litecoin archive from the official
 `litecoin-project/litecoin` release and verifies its SHA-256 before running the
 same command.
+
+## Bitcoin atomic-swap integration test
+
+The Bitcoin suite repeats the complete cross-chain lifecycle against an
+official Bitcoin Core regtest process and a fresh in-process QDAY development
+chain. It mines real test inputs, spends a P2WSH SHA-256 HTLC and never connects
+to a public network.
+
+Set `BITCOIND` to Bitcoin Core v31.1 or a compatible binary and run:
+
+```sh
+BITCOIND=/path/to/bitcoind \
+  go test -tags=integration ./internal/daemon \
+  -run '^TestQdayBitcoinAtomicSwap$' -count=1 -v -timeout=5m
+```
+
+The suite verifies:
+
+- unconfirmed Bitcoin and QDAY funding across process and service restarts;
+- extraction of the shared secret from a Bitcoin claim and its use on QDAY;
+- rejection of an incorrect secret on both sides of the exchange;
+- Bitcoin and QDAY claim recovery through reorganizations;
+- rejection of early refunds and confirmation of mature refunds;
+- three concurrent swaps with independent keys, contracts and secrets.
+
+GitHub Actions downloads the pinned Bitcoin Core archive from the official
+`bitcoincore.org` distribution, verifies its SHA-256 and runs the same command.

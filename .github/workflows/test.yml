@@ -50,3 +50,31 @@ jobs:
       - run: go mod verify
       - name: Test QDAY and Litecoin atomic swaps
         run: go test -tags=integration ./internal/daemon -run '^TestQdayLitecoinAtomicSwap$' -count=1 -v -timeout=5m
+
+  bitcoin-swap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BITCOIN_VERSION: 31.1
+      BITCOIN_ARCHIVE_SHA256: b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.x'
+      - name: Install verified Bitcoin Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz"
+          url="https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/${archive}"
+          curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${archive}" "$url"
+          echo "${BITCOIN_ARCHIVE_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          mkdir "${RUNNER_TEMP}/bitcoin"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/bitcoin" --strip-components=1
+          echo "BITCOIND=${RUNNER_TEMP}/bitcoin/bin/bitcoind" >> "$GITHUB_ENV"
+      - run: go mod verify
+      - name: Test QDAY and Bitcoin atomic swaps
+        run: go test -tags=integration ./internal/daemon -run '^TestQdayBitcoinAtomicSwap$' -count=1 -v -timeout=5m

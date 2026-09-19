@@ -155,6 +155,8 @@ claim reveals it.
 
 See the [atomic swap API](docs/API.md#atomic-swaps) for request bodies and the
 derivation rule in [operations.md](docs/operations.md#deterministic-derivation).
+The integration suite executes complete QDAY ↔ Bitcoin and QDAY ↔ Litecoin
+swaps against fresh local regtest chains.
 
 ## Backups
 

@@ -165,3 +165,30 @@ swapID     = dex-order-17
 swapSeed   = aa2605584ef7f795bb4be46189ee4c614872e595a6bc30cf50e53ce9fa4bb308
 address    = qday1p2etdds8uzx7r2a60n6la4peu02raw4fxkdpcwtkd8sn7l5dyn3cqhl9lwm
 ```
+
+## Litecoin atomic-swap integration test
+
+The integration suite starts a fresh official Litecoin Core regtest process
+and a fresh in-process QDAY development chain. It mines test funds from both
+chains and uses one SHA-256 secret in a real Litecoin P2WSH HTLC and a real
+QDAY atomic-swap output. Neither process connects to a public network.
+
+Set `LITECOIND` to Litecoin Core v0.21.5.8 or a compatible binary and run:
+
+```sh
+LITECOIND=/path/to/litecoind \
+  go test -tags=integration ./internal/daemon \
+  -run '^TestQdayLitecoinAtomicSwap$' -count=1 -v -timeout=5m
+```
+
+The suite verifies:
+
+- unconfirmed funding on both chains and clean process/service restarts;
+- Litecoin claim-secret extraction followed by the QDAY claim;
+- Litecoin and QDAY claim recovery through reorganizations;
+- rejection of early refunds and confirmation of mature refunds;
+- three concurrent swaps with independent keys, contracts and secrets.
+
+GitHub Actions downloads the pinned Litecoin archive from the official
+`litecoin-project/litecoin` release and verifies its SHA-256 before running the
+same command.
